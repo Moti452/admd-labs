@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 
-import '../api/todo_api.dart';
 import '../models/todo.dart';
+import '../todos/bloc/todo_bloc.dart';
 
+// fara setState, ecranul doar citeste state-ul din TodoBloc
 class TodoScreen extends StatefulWidget {
   const TodoScreen({super.key});
 
@@ -11,21 +13,7 @@ class TodoScreen extends StatefulWidget {
 }
 
 class _TodoScreenState extends State<TodoScreen> {
-  final TodoApi _api = TodoApi();
   final TextEditingController _inputController = TextEditingController();
-
-  List<Todo> _items = [];
-  final List<String> _log = [];
-  bool _loading = false;
-  bool _testingRetry = false;
-  String? _error;
-
-  @override
-  void initState() {
-    super.initState();
-    _equalityCheck();
-    _loadTodos();
-  }
 
   @override
   void dispose() {
@@ -33,100 +21,10 @@ class _TodoScreenState extends State<TodoScreen> {
     super.dispose();
   }
 
-  // ---------------- Task I: equality ----------------
-
-  void _equalityCheck() {
-    const json = {
-      'userId': 1,
-      'id': 1,
-      'title': 'delectus aut autem',
-      'completed': false,
-    };
-    // Două instanțe separate, create din același JSON.
-    final a = Todo.fromJson(json);
-    final b = Todo.fromJson(json);
-    debugPrint('a == b -> ${a == b}');
-    debugPrint('identical(a, b) -> ${identical(a, b)}');
-    debugPrint('a.toJson() -> ${a.toJson()}');
-    _log.add('${_time()}  Equatable: a == b -> ${a == b}, '
-        'identical(a, b) -> ${identical(a, b)}');
-  }
-
-  // ---------------- Task II: API + retry ----------------
-
-  void _addLog(String message) {
-    final line = '${_time()}  $message';
-    debugPrint(line);
-    if (!mounted) return;
-    setState(() {
-      _log.add(line);
-      if (_log.length > 200) _log.removeAt(0);
-    });
-  }
-
-  Future<void> _loadTodos() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    _addLog('GET /todos');
-    try {
-      final todos = await withRetry(() => _api.fetchTodos(), log: _addLog);
-      if (!mounted) return;
-      setState(() {
-        _items = todos;
-        _loading = false;
-      });
-      _addLog('Am primit ${todos.length} todo-uri de la API');
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _loading = false;
-        _error = 'Nu am putut încărca lista de la API.';
-      });
-    }
-  }
-
-  /// Demo: path invalid -> 404 la fiecare încercare -> retry cu delay crescător.
-  Future<void> _testInvalidPath() async {
-    setState(() => _testingRetry = true);
-    _addLog('GET /nope (test retry)');
-    try {
-      await withRetry(() => _api.fetchTodos(path: '/nope'), log: _addLog);
-    } catch (_) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('/nope a eșuat după 5 încercări')),
-      );
-    } finally {
-      if (mounted) setState(() => _testingRetry = false);
-    }
-  }
-
-  // ---------------- Lab 3: todo list ----------------
-
-  int _countCompleted() {
-    int count = 0;
-    for (var i = 0; i < _items.length; i++) {
-      if (_items[i].completed) count++;
-    }
-    return count;
-  }
-
   void _addTodo() {
     final title = _inputController.text.trim();
     if (title.isEmpty) return;
-    setState(() {
-      _items.insert(
-        0,
-        Todo(
-          userId: 1,
-          id: DateTime.now().millisecondsSinceEpoch,
-          title: title,
-          completed: false,
-        ),
-      );
-    });
+    context.read<TodoBloc>().add(AddTodo(title));
     _inputController.clear();
     Navigator.of(context).pop();
   }
@@ -155,18 +53,9 @@ class _TodoScreenState extends State<TodoScreen> {
     );
   }
 
-  void _toggleTodo(Todo todo) {
-    setState(() {
-      final i = _items.indexWhere((t) => t.id == todo.id);
-      if (i != -1) _items[i] = todo.copyWith(completed: !todo.completed);
-    });
-  }
-
-  void _removeTodo(Todo todo) {
-    final index = _items.indexWhere((t) => t.id == todo.id);
-    setState(() {
-      _items.removeWhere((t) => t.id == todo.id);
-    });
+  void _removeTodo(Todo todo, int index) {
+    final bloc = context.read<TodoBloc>();
+    bloc.add(RemoveTodo(todo.id));
 
     ScaffoldMessenger.of(context).clearSnackBars();
     ScaffoldMessenger.of(context).showSnackBar(
@@ -174,11 +63,7 @@ class _TodoScreenState extends State<TodoScreen> {
         content: Text('Sarcina "${todo.title}" a fost ștersă'),
         action: SnackBarAction(
           label: 'Undo',
-          onPressed: () {
-            setState(() {
-              _items.insert(index.clamp(0, _items.length), todo);
-            });
-          },
+          onPressed: () => bloc.add(RestoreTodo(todo, index)),
         ),
       ),
     );
@@ -186,64 +71,58 @@ class _TodoScreenState extends State<TodoScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text('Todo (${_countCompleted()}/${_items.length})'),
-        actions: [
-          IconButton(
-            tooltip: 'Reîncarcă de la API',
-            icon: const Icon(Icons.refresh),
-            onPressed: _loading ? null : _loadTodos,
+    return BlocBuilder<TodoBloc, TodoState>(
+      builder: (context, state) {
+        final done = state.todos.where((t) => t.completed).length;
+        return Scaffold(
+          appBar: AppBar(
+            title: Text('Todo ($done/${state.todos.length})'),
+            actions: [
+              IconButton(
+                tooltip: 'Reîncarcă de la API',
+                icon: const Icon(Icons.refresh),
+                onPressed: state.loading
+                    ? null
+                    : () => context.read<TodoBloc>().add(LoadTodos()),
+              ),
+            ],
           ),
-          IconButton(
-            tooltip: 'Test retry pe /nope',
-            icon: const Icon(Icons.bug_report),
-            onPressed: _testingRetry ? null : _testInvalidPath,
+          body: _buildBody(state),
+          floatingActionButton: FloatingActionButton(
+            onPressed: _showAddDialog,
+            child: const Icon(Icons.add),
           ),
-        ],
-      ),
-      body: Column(
-        children: [
-          Expanded(child: _buildList()),
-          RetryLogPanel(
-            lines: _log,
-            onClear: () => setState(_log.clear),
-          ),
-        ],
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _showAddDialog,
-        child: const Icon(Icons.add),
-      ),
+        );
+      },
     );
   }
 
-  Widget _buildList() {
-    if (_loading && _items.isEmpty) {
+  Widget _buildBody(TodoState state) {
+    if (state.loading && state.todos.isEmpty) {
       return const Center(child: CircularProgressIndicator());
     }
-    if (_error != null && _items.isEmpty) {
+    if (state.error != null && state.todos.isEmpty) {
       return Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(_error!),
+            Text(state.error!),
             const SizedBox(height: 12),
             ElevatedButton(
-              onPressed: _loadTodos,
+              onPressed: () => context.read<TodoBloc>().add(LoadTodos()),
               child: const Text('Reîncearcă'),
             ),
           ],
         ),
       );
     }
-    if (_items.isEmpty) {
+    if (state.todos.isEmpty) {
       return const Center(child: Text('Nu există sarcini.'));
     }
     return ListView.builder(
-      itemCount: _items.length,
+      itemCount: state.todos.length,
       itemBuilder: (context, index) {
-        final todo = _items[index];
+        final todo = state.todos[index];
         return Dismissible(
           key: ValueKey(todo.id),
           direction: DismissDirection.endToStart,
@@ -253,21 +132,14 @@ class _TodoScreenState extends State<TodoScreen> {
             padding: const EdgeInsets.only(right: 20),
             child: const Icon(Icons.delete, color: Colors.white),
           ),
-          onDismissed: (_) => _removeTodo(todo),
+          onDismissed: (_) => _removeTodo(todo, index),
           child: TodoTile(
             todo: todo,
-            onChanged: () => _toggleTodo(todo),
+            onChanged: () => context.read<TodoBloc>().add(ToggleTodo(todo.id)),
           ),
         );
       },
     );
-  }
-
-  static String _time() {
-    final now = DateTime.now();
-    String two(int n) => n.toString().padLeft(2, '0');
-    final ms = now.millisecond.toString().padLeft(3, '0');
-    return '${two(now.hour)}:${two(now.minute)}:${two(now.second)}.$ms';
   }
 }
 
@@ -297,62 +169,6 @@ class TodoTile extends StatelessWidget {
           ),
         ),
         subtitle: Text('id ${todo.id} · user ${todo.userId}'),
-      ),
-    );
-  }
-}
-
-/// Panoul de jos cu log-ul de retry (cerut la prezentare).
-class RetryLogPanel extends StatelessWidget {
-  final List<String> lines;
-  final VoidCallback onClear;
-
-  const RetryLogPanel({super.key, required this.lines, required this.onClear});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      height: 180,
-      width: double.infinity,
-      color: const Color(0xFF1E1E1E),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Padding(
-                padding: EdgeInsets.only(left: 12),
-                child: Text(
-                  'Retry log',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
-              const Spacer(),
-              TextButton(
-                onPressed: onClear,
-                child: const Text('Clear'),
-              ),
-            ],
-          ),
-          Expanded(
-            child: ListView.builder(
-              reverse: true, // cele mai noi linii jos
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              itemCount: lines.length,
-              itemBuilder: (context, i) => Text(
-                lines[lines.length - 1 - i],
-                style: const TextStyle(
-                  color: Colors.greenAccent,
-                  fontFamily: 'monospace',
-                  fontSize: 12,
-                ),
-              ),
-            ),
-          ),
-        ],
       ),
     );
   }
